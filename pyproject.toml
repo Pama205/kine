@@ -1,0 +1,59 @@
+[tool.poetry]
+name = "ai-flow"
+version = "0.1.0"
+description = "Integrate AI models (Gemini, DeepSeek, OpenAI, HuggingFace, etc.) with one line of code"
+authors = ["Pedro Alexander Martinez Arthur <pama205@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "ai_flow"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+# Proveedores principales
+openai = { version = "^1.0", optional = true }
+google-generativeai = { version = "^0.3.0", optional = true, markers = "python_version >= '3.9'"}
+# deepseek = { version = "^0.0.1", optional = true } # Ajusta según el paquete oficial
+huggingface-hub = { version = "^0.20.0", optional = true }
+# Utilidades básicas
+requests = "^2.31.0"
+rich = "^13.7.0"
+python-dotenv = "^1.0.0"
+
+[tool.poetry.extras]
+openai = ["openai"]
+huggingface = ["huggingface-hub"]
+gemini = ["google-generativeai"]
+deepseek = ["deepseek"]
+all = ["openai", "huggingface-hub", "google-generativeai", "deepseek"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+mypy = "^1.8.0"
+black = "^24.1.0"
+isort = "^5.13.2"
+pre-commit = "^3.6.0"
+git-changelog = "^2.5.3"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.git-changelog]
+# Configuración básica
+output = "CHANGELOG.md"
+template = "keepachangelog"
+remote = "origin"
+branch = "main"
+parse_refs= false
+# Filtra los tipos de commits que aparecerán
+types = ["feat", "fix", "perf", "refactor"]
+# Traducciones opcionales (español)
+sections = [
+    { name = "feat", title = "🚀 Nuevas Funcionalidades" },
+    { name = "fix", title = "🐛 Correcciones" },
+    { name = "perf", title = "⚡ Mejoras de Rendimiento" },
+    { name = "refactor", title = "♻️ Refactorizaciones" }
+]
+
+[tool.poetry.scripts]
+changelog = "scripts.generate_changelog:generate_changelog"
