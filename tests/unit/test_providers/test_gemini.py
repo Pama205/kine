@@ -1,17 +1,17 @@
-# examples/test_gemini.py
-from ai_flow import AIFlow
-from ai_flow.schemas.requests import TextGenerationRequest
+import asyncio
 
-ai = AIFlow("gemini")
+from kine import Kine
+from kine.providers.gemini import GeminiProvider
+from kine.schemas.requests import TextGenerationRequest
 
-# Opción 1: Usando string simple (crea Request automáticamente)
-#response = ai.generate_text("Explica quantum computing")
-#print(response.text)
+provider = GeminiProvider(api_key="test-key")
+kine = Kine(provider)
 
-# Opción 2: Usando Request explícita (NO anidada)
-request = TextGenerationRequest(
-    prompt="Traduce: Hello world",
-    temperature=0.5
-)
-response = ai.generate_text(request)  # Pasa el objeto directamente
-print(response.text)
+
+async def main() -> None:
+    request = TextGenerationRequest(prompt="Translate: Hello world", temperature=0.5)
+    response = await kine.generate_text(request)
+    print(response.text)
+
+
+asyncio.run(main())

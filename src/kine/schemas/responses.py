@@ -1,5 +1,6 @@
-# ai_flow/schemas/responses.py
+# kine/schemas/responses.py
 from pydantic import BaseModel
+
 
 class TextGenerationResponse(BaseModel):
     text: str

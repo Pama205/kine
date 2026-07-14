@@ -1,117 +1,105 @@
-# AI Flow - Integración Unificada de Modelos de IA
+# kine — Unified AI Model Integration
 
 ![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Poetry](https://img.shields.io/badge/packaging-poetry-cyan)
 
-Una librería Python para integrar múltiples proveedores de IA (Gemini, OpenAI, etc.) con una interfaz simple y unificada.
+A Python library for integrating multiple AI providers (Gemini, OpenAI, DeepSeek, HuggingFace, etc.) through a simple, unified, async-first interface.
 
-## 🔥 Características Principales
+## Features
 
-- **Soporte multi-proveedor**: Gemini, OpenAI, DeepSeek y más
-- **Interfaz unificada**: Mismos métodos para todos los proveedores
-- **Tipado fuerte**: Validación automática de entradas/salidas
-- **Fácil extensión**: Añade nuevos proveedores en minutos
+- **Multi-provider support:** Gemini, OpenAI, DeepSeek, HuggingFace, and more to come
+- **Unified interface:** same methods for every provider
+- **Strong typing:** automatic input/output validation with Pydantic
+- **Easy to extend:** add new providers in minutes
 
-## 📦 Instalación
+## Installation
 
 ```bash
-# Instalar con Poetry (recomendado)
-poetry add ai-flow --extras "all"
+# With Poetry (recommended)
+poetry install --extras "all"
 
-# O con pip
-pip install ai-flow[all]
+# Or with pip
+pip install kine[all]
 ```
 
-## 🏗 Estructura del Proyecto
+## Project Structure
+
 ```plaintext
-ai-flow/
-├── ai_flow/               # Paquete principal
-│   ├── __init__.py        # Exporta clases/funciones principales
-│   ├── core.py            # Clase `AIFlow` (punto de entrada)
-│   ├── providers/         # Conexiones a APIs/modelos
-│   │   ├── __init__.py
-│   │   ├── openai.py      # Soporte para OpenAI
-│   │   ├── huggingface.py # Soporte para HF Inference API
-│   │   └── local.py       # Modelos ONNX/TensorFlow Lite
-│   ├── models/            # Modelos pre-entrenados locales (opcional)
-│   ├── utils/             # Helpers
-│   │   ├── cache.py       # Caché con Redis/SQLite
-│   │   └── ethics.py      # Filtros de contenido
-├── tests/                 # Tests unitarios
-│   ├── test_core.py
-│   └── test_providers.py
-├── examples/              # Ejemplos de uso
-│   ├── basic_usage.py
-│   └── web_integration.py
-├── docs/                  # Documentación
-│   ├── quickstart.md
-│   └── api_reference.md
-├── pyproject.toml         # Configuración de build (Poetry)
-├── README.md              # Doc principal (badges, instalación)
-└── LICENSE                # MIT/Apache 2.0
+kine/
+├── src/kine/              # Main package (src layout)
+│   ├── __init__.py        # Public API exports
+│   ├── core.py            # Kine entry point
+│   ├── providers/         # Provider adapters
+│   ├── schemas/           # Pydantic models
+│   └── utils/             # Helpers
+├── tests/                 # Unit tests (outside src/)
+├── examples/              # Usage examples
+├── docs/                  # Documentation
+├── pyproject.toml         # Build configuration (Poetry)
+├── README.md              # Main documentation
+└── LICENSE                # MIT
 ```
 
-## 🚀 Uso Rápido
+## Quickstart
+
+```python
+import asyncio
+from kine import Kine
+from kine.providers.gemini import GeminiProvider
+
+async def main() -> None:
+    provider = GeminiProvider(api_key="YOUR_API_KEY")
+    ai = Kine(provider)
+
+    response = await ai.generate_text(
+        "Explain quantum computing in one sentence"
+    )
+    print(response.text)
+
+asyncio.run(main())
+```
+
+> **Note:** Only the **Gemini** provider is fully implemented. OpenAI, DeepSeek, and HuggingFace adapters are placeholder stubs.
+
+## Development
+
+1. Clone the repository:
 
 ```bash
-from ai_flow import AIFlow
-from dotenv import load_dotenv
-
-load_dotenv()  # Carga API keys desde .env
-
-# Inicialización
-ai = AIFlow(
-    provider="gemini",  # También "openai", "deepseek"
-    model="gemini-1.5-pro-latest"  # Modelo opcional
-)
-
-# Generación de texto
-response = ai.generate_text(
-    "Explica el quantum computing en una frase"
-)
-print(response.text)
+git clone https://github.com/your-user/kine.git
+cd kine
 ```
 
-## 🛠 Desarrollo
+2. Install in editable mode with all extras:
 
-1- Clona el repositorio:
-```bash
-git clone https://github.com/tu-usuario/ai-flow.git
-cd ai-flow
-```
-
-2- Instala dependencias:
 ```bash
 poetry install --extras "all"
 ```
 
-3- Ejecuta tests:
+3. Run tests:
+
 ```bash
-poetry run pytest -v    
+poetry run pytest -v
 ```
 
-## 🤝 Contribución
+## Contributing
 
-¡Contribuciones son bienvenidas! Sigue estos pasos:
+Contributions are welcome. Please follow these steps:
 
-1- Abre un Issue para discutir el cambio
+1. Open an issue to discuss the change
+2. Fork the project
+3. Create a feature branch (`git checkout -b feature/awesome-feature`)
+4. Commit your changes (`git commit -m 'Add awesome feature'`)
+5. Push the branch (`git push origin feature/awesome-feature`)
+6. Open a Pull Request
 
-2- Haz fork del proyecto
+## Changelog
 
-3- Crea una rama con tu feature (git checkout -b feature/awesome-feature)
+See [CHANGELOG.md](CHANGELOG.md) for version details.
 
-4- Haz commit de tus cambios (git commit -m 'Add awesome feature')
+## Contact
 
-5- Haz push a la rama (git push origin feature/awesome-feature)
-
-6- Abre un Pull Request
-
-## 📜 Historial de Cambios
-Consulta el [CHANGELOG.md](CHANGELOG.md) para detalles de cada versión.
-
-## 📬 Contacto
-
-- **Creador**: Pedro A. Martínez A.
-- **Email**: pama205@gmail.com
-- **GitHub**: [@pama205](https://github.com/pama205)
+- **Author:** Pedro A. Martínez A.
+- **Email:** pama205@gmail.com
+- **GitHub:** [@pama205](https://github.com/pama205)
