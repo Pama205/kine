@@ -1,7 +1,7 @@
 from typing import Protocol
 
-from kine.schemas.requests import TextGenerationRequest
-from kine.schemas.responses import TextGenerationResponse
+from .schemas.requests import TextGenerationRequest
+from .schemas.responses import TextGenerationResponse
 
 
 class IAProvider(Protocol):

@@ -12,7 +12,6 @@ packages = [{include = "kine", from = "src"}]
 python = "^3.10"
 # Core runtime dependencies (must remain ultralight)
 pydantic = "^2.5"
-python-dotenv = "^1.0.0"
 
 # Provider SDKs — install only the ones you need via extras
 openai = { version = "^1.0", optional = true }
@@ -37,6 +36,7 @@ black = "^24.1.0"
 isort = "^5.13.2"
 pre-commit = "^3.6.0"
 git-changelog = "^2.5.3"
+python-dotenv = "^1.0.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -70,10 +70,10 @@ branch = "main"
 parse_refs = false
 types = ["feat", "fix", "perf", "refactor"]
 sections = [
-    { name = "feat", title = "🚀 Nuevas Funcionalidades" },
-    { name = "fix", title = "🐛 Correcciones" },
-    { name = "perf", title = "⚡ Mejoras de Rendimiento" },
-    { name = "refactor", title = "♻️ Refactorizaciones" }
+    { name = "feat", title = "🚀 Features" },
+    { name = "fix", title = "🐛 Bug Fixes" },
+    { name = "perf", title = "⚡ Performance Improvements" },
+    { name = "refactor", title = "♻️ Refactoring" }
 ]
 
 [tool.poetry.scripts]

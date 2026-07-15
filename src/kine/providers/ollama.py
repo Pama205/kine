@@ -50,3 +50,12 @@ class OllamaProvider:
             return cast(list[float], data["embedding"])
         except httpx.HTTPError as e:
             raise ProviderAPIError(f"Ollama embedding error: {e}") from e
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "OllamaProvider":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()

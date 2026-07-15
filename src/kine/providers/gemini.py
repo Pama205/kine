@@ -10,25 +10,22 @@ from ..schemas.responses import TextGenerationResponse
 
 
 class GeminiProvider:
-    _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini_")
-
     def __init__(self, api_key: str, model: str = "gemini-1.5-pro-latest") -> None:
         if not api_key:
             raise APIKeyNotFoundError("API key is required for Gemini")
-        genai.configure(api_key=api_key)
-        self._model = genai.GenerativeModel(model)
+        try:
+            genai.configure(api_key=api_key)
+            self._model = genai.GenerativeModel(model)
+        except Exception as e:
+            raise ProviderAPIError(f"Gemini initialization failed: {e}") from e
         self._model_name = model
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini_")
 
     async def generate_text(
         self, request: TextGenerationRequest
     ) -> TextGenerationResponse:
-        loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(
-                self._executor,
-                self._sync_generate,
-                request,
-            )
+            response = await asyncio.to_thread(self._sync_generate, request)
             return TextGenerationResponse(text=response.text, model=self._model_name)
         except Exception as e:
             raise ProviderAPIError(f"Gemini API error: {e}") from e
@@ -43,4 +40,13 @@ class GeminiProvider:
         )
 
     async def generate_embeddings(self, text: str) -> list[float]:
-        raise NotImplementedError("Embeddings not yet supported for Gemini")
+        raise ProviderAPIError("Embeddings are not supported by Gemini provider")
+
+    async def aclose(self) -> None:
+        self._executor.shutdown(wait=True)
+
+    async def __aenter__(self) -> "GeminiProvider":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.aclose()
