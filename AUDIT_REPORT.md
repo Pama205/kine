@@ -1,479 +1,498 @@
 # Architecture Audit Report — kine
 
 **Scope:** Orthogonality, adapter isolation, concurrency, DX/public API, and packaging.
-**Auditor:** OpenCode (strict mode)
-**Date:** 2026-07-14
+**Auditor:** OpenCode (Strict Mode)
+**Date:** 2026-07-15
 
 ---
 
 ## Executive Summary
 
-The repository is in a very early, partially implemented state. Only the **Gemini** provider works; OpenAI, DeepSeek, and HuggingFace adapters are empty stubs. The current architecture violates the core requirement that the domain engine must depend on abstractions, not concrete implementations. The single implemented adapter is not isolated, the public API is incomplete, the code is fully synchronous, and the packaging layout does not follow modern `src/` conventions.
+The `kine` library has made significant progress toward Clean Architecture since the previous audit. The core (`Kine`) no longer imports SDKs, resolves environment variables, or manages a provider registry. The `IAProvider` protocol is defined, and both `OllamaProvider` and `GeminiProvider` conform structurally.
 
-**Overall verdict:** The library does **not** comply with the stated architecture standards. Significant refactoring is required before it can be considered production-grade or "ultralight."
+However, several critical and high-severity issues remain — including resource leaks in adapters, unexported public types, a mandatory runtime dependency that violates separation of concerns, and the complete absence of both unit tests and CI pipeline.
+
+**Overall verdict:** The architecture direction is correct, but production-readiness requires fixing 2 critical, 4 high, and 4 medium issues before a 1.0 release.
 
 ---
 
 ## 1. Orthogonality and Contract Verification (Domain Layer)
 
 ### Standard
-The core engine must depend only on domain contracts (`typing.Protocol` or `ABC`), never on concrete third-party libraries, SDKs, or I/O details.
+The domain engine must depend only on domain contracts (`typing.Protocol` or ABCs), never on concrete third-party libraries, SDKs, or I/O details.
 
 ### Findings
 
-#### 1.1 No domain protocol/ABC for providers exists
-`kine/core.py` references providers only through dynamic string imports and duck typing. There is no `Protocol` or `ABC` defining what a provider must implement.
+#### 1.1 Protocol defined — but uses absolute imports
+
+`IAProvider` is defined in `src/kine/protocols.py` using the correct `typing.Protocol` base. However, it uses absolute imports (`from kine.schemas.request import ...`) instead of relative imports:
 
 ```python
-# kine/core.py
-PROVIDERS = {
-    'gemini': ('kine.providers.gemini', 'GeminiProvider')
-}
-
-def _load_provider(self, provider_name: str, config: Dict) -> Type:
-    module_path, class_name = self.PROVIDERS[provider_name]
-    module = __import__(module_path, fromlist=[class_name])
-    return getattr(module, class_name)(**config)
+# src/kine/protocols.py:3-4
+from kine.schemas.requests import TextGenerationRequest   # absolute
+from kine.schemas.responses import TextGenerationResponse  # absolute
 ```
 
-The engine calls `self.provider.generate_text(prompt)` blindly. Any object with that method will work, but there is no contract enforced by type checkers or runtime checks.
+Absolute imports make the module fragile when the package is installed in a non-standard layout or when running tests outside the installed environment. Relative imports (`from ..schemas.requests import ...`) are the convention within a single package.
 
-#### 1.2 The engine reads environment variables directly
-`core.py` imports `os` and resolves API keys from the environment. Key resolution is an infrastructure concern and should not live in the domain engine.
+**Severity:** Medium  
+**Fix:** Switch to relative imports:
 
 ```python
-# kine/core.py
-import os
-
-api_key = config.get('api_key') or os.getenv(f"{provider_name.upper()}_API_KEY")
-if not api_key:
-    raise APIKeyNotFoundError(f"API key no proporcionada para {provider_name}")
+from ..schemas.requests import TextGenerationRequest
+from ..schemas.responses import TextGenerationResponse
 ```
 
-#### 1.3 Concrete schema classes are imported into the engine
-While not as severe as importing an SDK, the engine hardcodes `TextGenerationRequest` and `TextGenerationResponse`. A cleaner design would define domain-level request/response protocols so the engine remains agnostic of specific DTO shapes.
+#### 1.2 Protocol imports concrete DTOs
 
-### Severity
-**High** — the engine is coupled to concrete provider resolution and environment handling.
+`IAProvider` directly references `TextGenerationRequest` and `TextGenerationResponse`. In strict Clean Architecture, the domain protocol should define its own abstract request/response types to avoid coupling to Pydantic. However, for a library of this size, using Pydantic models as domain types is a pragmatic trade-off.
 
-### Recommended Fixes
+**Severity:** Low (informational)  
 
-1. Define a `Protocol` in a new `kine/domain/protocols.py`:
+#### 1.3 `Kine.generate_text` bypasses type safety with `**kwargs`
 
 ```python
-from typing import Protocol
-from kine.schemas.requests import TextGenerationRequest
-from kine.schemas.responses import TextGenerationResponse
-
-class IAProvider(Protocol):
-    async def generate_text(self, request: TextGenerationRequest) -> TextGenerationResponse:
-        ...
+# src/kine/core.py:12-18
+async def generate_text(
+    self, prompt: str | TextGenerationRequest, **kwargs: Any
+) -> TextGenerationResponse:
 ```
 
-2. Make `Kine` accept an injected provider instance or a factory that returns `IAProvider`:
+`**kwargs: Any` disables autocomplete and type checking for `temperature`, `max_tokens`, and any future request fields. The caller gets no IDE feedback.
+
+**Severity:** Medium  
+**Fix:** Accept an optional `TextGenerationRequest` or make the constructor parameters explicit:
 
 ```python
-class Kine:
-    def __init__(self, provider: IAProvider) -> None:
-        self.provider = provider
+async def generate_text(
+    self,
+    prompt: str | TextGenerationRequest,
+    temperature: float = 0.7,
+    max_tokens: int = 300,
+) -> TextGenerationResponse:
+    if isinstance(prompt, TextGenerationRequest):
+        request = prompt
+    else:
+        request = TextGenerationRequest(
+            prompt=prompt, temperature=temperature, max_tokens=max_tokens
+        )
+    return await self._provider.generate_text(request)
 ```
 
-3. Move API-key resolution and module loading to an adapter factory/registry (`kine/providers/factory.py`), not `core.py`.
+### Domain Verdict
+| # | Issue | Severity |
+|---|---|---|
+| 1.1 | Absolute imports in `protocols.py` | Medium |
+| 1.2 | Protocol imports concrete DTOs | Low |
+| 1.3 | `**kwargs: Any` disables type safety | Medium |
 
 ---
 
 ## 2. Infrastructure Isolation Verification (Adapters)
 
 ### Standard
-Adapters must implement the domain protocol exactly and encapsulate all external I/O, HTTP handling, JSON parsing, and SDK-specific errors. No infrastructure exceptions should leak to the engine.
+Adapters must implement the domain protocol exactly and encapsulate all external I/O, HTTP handling, SDK errors, and configuration. No raw SDK exceptions may leak to callers.
 
 ### Findings
 
-#### 2.1 Adapter does not implement a declared protocol
-`kine/providers/gemini.py` defines `GeminiProvider` as a plain class. It does not explicitly implement any domain protocol.
+#### 2.1 `GeminiProvider.__init__` leaks SDK exceptions (CRITICAL)
 
 ```python
-# kine/providers/gemini.py
-import google.generativeai as genai
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
-
-class GeminiProvider:
-    ...
-```
-
-#### 2.2 Adapter imports infrastructure directly
-The adapter imports `google.generativeai`, configures the API key, and instantiates `genai.GenerativeModel` directly. This is correct **only if** the class is hidden behind a protocol, but currently the engine knows only the concrete class name via string import.
-
-```python
-# kine/providers/gemini.py
+# src/kine/providers/gemini.py:18-19
 genai.configure(api_key=api_key)
-self.model = genai.GenerativeModel(model)
+self._model = genai.GenerativeModel(model)
 ```
 
-#### 2.3 Error handling is too broad and leaks SDK exceptions
-The adapter catches `Exception` generically and re-raises a class defined locally (`GeminiAPIError`), which is itself defined inside the adapter file rather than in the shared `errors.py` module.
+Both `genai.configure()` and `genai.GenerativeModel()` can raise `google.api_core.exceptions.*` (e.g., `InvalidArgument`, `PermissionDenied`). These are NOT caught by any try/except block, so they propagate unmodified to the caller. A user of `GeminiProvider` could receive a raw Google SDK exception.
+
+**Severity:** Critical  
+**Fix:** Wrap initialization in a try/except that maps to `ProviderAPIError`:
 
 ```python
-# kine/providers/gemini.py
-except Exception as e:
-    raise GeminiAPIError(f"Error en Gemini: {str(e)}")
-
-class GeminiAPIError(Exception):
-    """Error específico de la API de Gemini."""
-    pass
+def __init__(self, api_key: str, model: str = "gemini-1.5-pro-latest") -> None:
+    if not api_key:
+        raise APIKeyNotFoundError("API key is required for Gemini")
+    try:
+        genai.configure(api_key=api_key)
+        self._model = genai.GenerativeModel(model)
+        self._model_name = model
+    except Exception as e:
+        raise ProviderAPIError(f"Gemini initialization failed: {e}") from e
 ```
 
-This means:
-- The engine cannot catch a unified domain exception.
-- Stack traces from the Google SDK are stringified and may lose machine-readable details.
-- `GeminiAPIError` is not exported from the package.
-
-#### 2.4 Response metadata is hardcoded and incorrect
-The adapter returns `model="gemini-pro"` regardless of the model actually used.
+#### 2.2 `GeminiProvider` class-level `ThreadPoolExecutor` never shut down (HIGH)
 
 ```python
-# kine/providers/gemini.py
-return TextGenerationResponse(
-    text=response.text,
-    model="gemini-pro"
-)
+# src/kine/providers/gemini.py:13
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini_")
 ```
 
-#### 2.5 Empty infrastructure modules
-`kine/utils/cache.py`, `logger.py`, and `safety.py` are empty. The spec mentions caching, logging, and safety filters, but no infrastructure exists for them.
+This executor is created at class definition time and **never shut down**. A `ThreadPoolExecutor` that is not explicitly shut down keeps worker threads alive until the interpreter exits. If providers are created/destroyed dynamically (e.g., in a web server worker), threads accumulate.
 
-### Severity
-**High** — the single working adapter mixes SDK, configuration, and error concerns without a domain contract.
-
-### Recommended Fixes
-
-1. Implement adapters against `IAProvider`:
+**Severity:** High  
+**Fix:** Make the executor an instance attribute and provide a shutdown method or use `AsyncExitStack`:
 
 ```python
-class GeminiProvider:
-    def __init__(self, api_key: str, model: str = "gemini-1.5-pro-latest") -> None:
-        ...
+def __init__(self, api_key: str, model: str = "gemini-1.5-pro-latest") -> None:
+    ...
+    self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini_")
 
-    async def generate_text(self, request: TextGenerationRequest) -> TextGenerationResponse:
-        ...
+async def shutdown(self) -> None:
+    self._executor.shutdown(wait=True)
 ```
 
-2. Translate SDK exceptions into domain exceptions defined in `kine/errors.py`:
+Alternatively, implement `__del__` or an async context manager.
+
+#### 2.3 `OllamaProvider` `AsyncClient` never closed (HIGH)
 
 ```python
-class ProviderAPIError(KineError):
-    """Raised when an external provider API call fails."""
+# src/kine/providers/ollama.py:18
+self._client = httpx.AsyncClient(timeout=60.0)
 ```
 
-3. Return the real model name and capture usage metadata.
-4. Remove `load_dotenv()` from the adapter; environment loading should happen once at application startup.
+The `httpx.AsyncClient` is created in `__init__` but never closed. The `httpx` documentation explicitly warns that unclosed clients can leak connections and file descriptors.
+
+**Severity:** High  
+**Fix:** Implement an async teardown method or use the client as a context manager:
+
+```python
+async def shutdown(self) -> None:
+    await self._client.aclose()
+```
+
+#### 2.4 `GeminiProvider` raises `NotImplementedError` for embeddings (MEDIUM)
+
+```python
+async def generate_embeddings(self, text: str) -> list[float]:
+    raise NotImplementedError("Embeddings not yet supported for Gemini")
+```
+
+`NotImplementedError` is a raw Python exception, not part of the `KineError` hierarchy. A caller doing `except KineError` will not catch this.
+
+**Severity:** Medium  
+**Fix:** Use `ProviderAPIError` instead:
+
+```python
+async def generate_embeddings(self, text: str) -> list[float]:
+    raise ProviderAPIError("Embeddings are not supported by Gemini provider")
+```
+
+#### 2.5 Placeholder stubs with correct docstrings exist — no code
+
+`openai.py`, `deepseek.py`, `huggingface.py` remain placeholder stubs with no implementation.
+
+**Severity:** Low (expected for early-stage)
+
+### Adapter Verdict
+| # | Issue | Severity |
+|---|---|---|
+| 2.1 | `GeminiProvider.__init__` leaks SDK exceptions | **Critical** |
+| 2.2 | `ThreadPoolExecutor` never shut down | High |
+| 2.3 | `AsyncClient` never closed | High |
+| 2.4 | `NotImplementedError` outside error hierarchy | Medium |
+| 2.5 | Placeholder stubs | Low |
 
 ---
 
 ## 3. Performance and Concurrency Verification
 
 ### Standard
-All network-bound and I/O-bound methods must be `async` and use async HTTP clients (`httpx`, `aiohttp`) so the library can be used in FastAPI/Starlette without blocking the event loop.
+All network-bound and I/O-bound methods must be `async def`. Blocking SDK calls must be wrapped with `run_in_executor` or `to_thread`. Async HTTP clients (e.g., `httpx.AsyncClient`) must be used for REST-based adapters.
 
 ### Findings
 
-#### 3.1 The entire public API is synchronous
-`Kine.__init__` and `Kine.generate_text` are `def`, not `async def`. The provider method is also synchronous.
+#### 3.1 Public API is async — conformant
+
+`Kine.generate_text`, `Kine.generate_embeddings`, `OllamaProvider.generate_text`, `OllamaProvider.generate_embeddings`, and `GeminiProvider.generate_text` are all `async def`. Gemini wraps its sync SDK via `run_in_executor`. This satisfies the standard.
+
+**Severity:** None (pass)
+
+#### 3.2 `asyncio.get_event_loop()` is the deprecated path (MEDIUM)
 
 ```python
-# kine/core.py
-def generate_text(self, prompt: str | TextGenerationRequest, **kwargs) -> TextGenerationResponse:
-    ...
-
-# kine/providers/gemini.py
-def generate_text(self, request: TextGenerationRequest) -> TextGenerationResponse:
-    response = self.model.generate_content(...)
-```
-
-#### 3.2 The adapter uses a blocking SDK
-`google-generativeai` is a synchronous SDK. Calling `self.model.generate_content(...)` blocks the thread for the entire HTTP round-trip.
-
-```python
-# kine/providers/gemini.py
-response = self.model.generate_content(
-    contents=request.prompt,
-    generation_config={...}
+# src/kine/providers/gemini.py:25-28
+loop = asyncio.get_event_loop()
+response = await loop.run_in_executor(
+    self._executor,
+    self._sync_generate,
+    request,
 )
 ```
 
-#### 3.3 `requests` is listed as a core dependency
-`pyproject.toml` includes `requests = "^2.31.0"` as a non-optional dependency, even though no code currently uses it. This signals intent to use synchronous HTTP elsewhere.
+`asyncio.get_event_loop()` is deprecated in Python 3.12 when there is no running loop. The modern replacement is `asyncio.to_thread()`, available since Python 3.9:
 
-```toml
-# pyproject.toml
-requests = "^2.31.0"
-```
-
-### Severity
-**Critical** — the library cannot be used safely in async server environments without blocking the event loop.
-
-### Recommended Fixes
-
-1. Convert the domain protocol and all public methods to `async`:
+**Severity:** Medium  
+**Fix:**
 
 ```python
-class IAProvider(Protocol):
-    async def generate_text(self, request: TextGenerationRequest) -> TextGenerationResponse:
-        ...
-
-class Kine:
-    async def generate_text(self, prompt: str | TextGenerationRequest, **kwargs) -> TextGenerationResponse:
-        ...
+async def generate_text(
+    self, request: TextGenerationRequest
+) -> TextGenerationResponse:
+    try:
+        response = await asyncio.to_thread(self._sync_generate, request)
+        return TextGenerationResponse(text=response.text, model=self._model_name)
+    except Exception as e:
+        raise ProviderAPIError(f"Gemini API error: {e}") from e
 ```
 
-2. Use an async HTTP client for providers that expose REST endpoints. For SDKs without async support, run the call in a `ThreadPoolExecutor` and expose it as `async`:
+#### 3.3 No async lifecycle management (MEDIUM)
+
+Neither `OllamaProvider` nor `GeminiProvider` implements an async teardown method or context manager (`__aenter__`/`__aexit__`). Users have no standard way to release client connections and executor threads.
+
+**Severity:** Medium  
+**Fix:** Add an `aclose()` method and consider implementing the async context manager protocol:
 
 ```python
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+class OllamaProvider:
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
-class GeminiProvider:
-    _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini_")
+    async def __aenter__(self) -> Self:
+        return self
 
-    async def generate_text(self, request: TextGenerationRequest) -> TextGenerationResponse:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self._executor,
-            self._sync_generate_text,
-            request,
-        )
+    async def __aexit__(self, *args: Any) -> None:
+        await self.aclose()
 ```
 
-3. Replace `requests` with `httpx` and make it optional per-provider.
+### Concurrency Verdict
+| # | Issue | Severity |
+|---|---|---|
+| 3.1 | Public API is async | Clear |
+| 3.2 | `get_event_loop()` deprecated path | Medium |
+| 3.3 | No async lifecycle management | Medium |
 
 ---
 
-## 4. Developer Experience (DX) and Public API Verification
+## 4. Developer Experience and Public API Verification
 
 ### Standard
-A developer should install the package and use it with minimal code and perfect autocompletion. Public types must be strict and fully exported via `__init__.py`.
+A developer must install the package and use it with minimal code and perfect autocompletion. Public types must have strict type hints and be fully exported via `__init__.py`.
 
 ### Findings
 
-#### 4.1 Public exports are incomplete
-`kine/__init__.py` only exports `Kine`, `KineError`, and `ProviderNotFoundError`. It omits the request/response schemas and other exceptions (`APIKeyNotFoundError`, `APIModelNotFoundError`), forcing users to import from internal modules.
+#### 4.1 `TextGenerationRequest` and `TextGenerationResponse` not exported (HIGH)
 
 ```python
-# kine/__init__.py
-from .core import Kine
-from .errors import KineError, ProviderNotFoundError
-
-__all__ = ["Kine", "KineError", "ProviderNotFoundError"]
+from kine import Kine, KineError  # works
+from kine.schemas.requests import TextGenerationRequest  # required, not top-level
 ```
 
-#### 4.2 Constructor accepts invalid typing
-`Kine.__init__` declares `api_key: str = None`, which is a mypy error (PEP 484 prohibits implicit Optional).
+`TextGenerationRequest` and `TextGenerationResponse` are referenced in the protocol and in `Kine.generate_text`, but are missing from `__init__.py` exports. Users must either import from `kine.schemas.requests` (violating encapsulation) or construct the request inline via `**kwargs`.
+
+**Severity:** High  
+**Fix:** Add them to `__init__.py`:
 
 ```python
-# kine/core.py
-def __init__(self, provider: str = "gemini", api_key: str = None, model: str = None, **kwargs):
-```
-
-#### 4.3 `_load_provider` return type is wrong
-The method is annotated `-> Type` but returns an instance. With no protocol, mypy cannot verify the result.
-
-```python
-# kine/core.py
-def _load_provider(self, provider_name: str, config: Dict) -> Type:
-    ...
-    return getattr(module, class_name)(**config)
-```
-
-#### 4.4 No static provider discovery
-Because the provider is selected by string (`"gemini"`), IDEs cannot autocomplete available providers or their configurations.
-
-#### 4.5 5-line script simulation
-This is the minimal happy-path script today:
-
-```python
-from kine import Kine
-from kine.schemas.requests import TextGenerationRequest  # internal import
-
-ai = Kine("gemini")
-request = TextGenerationRequest(prompt="Hello", temperature=0.5)
-response = ai.generate_text(request)
-print(response.text)
-```
-
-Problems:
-- `TextGenerationRequest` is not exported from the top-level package.
-- It requires a `GEMINI_API_KEY` environment variable or an `api_key=` argument.
-- It is synchronous, so it is unsuitable for async frameworks.
-
-### Severity
-**Medium-High** — the API is usable but incomplete, poorly typed, and not async-friendly.
-
-### Recommended Fixes
-
-1. Export schemas and all public exceptions from `__init__.py`:
-
-```python
-# kine/__init__.py
-from .core import Kine
-from .errors import KineError, ProviderNotFoundError, APIKeyNotFoundError, APIModelNotFoundError
 from .schemas.requests import TextGenerationRequest
 from .schemas.responses import TextGenerationResponse
 
 __all__ = [
     "Kine",
     "KineError",
+    "ProviderAPIError",
     "ProviderNotFoundError",
-    "APIKeyNotFoundError",
-    "APIModelNotFoundError",
+    "IAProvider",
     "TextGenerationRequest",
     "TextGenerationResponse",
 ]
 ```
 
-2. Fix type hints:
+#### 4.2 `APIKeyNotFoundError` and `APIModelNotFoundError` not exported (MEDIUM)
+
+These exceptions exist in `errors.py` (used by `GeminiProvider.__init__`) but are not exported from `__init__.py`. Callers cannot catch them without deep imports.
+
+**Severity:** Medium  
+**Fix:** Export them alongside `ProviderAPIError`:
 
 ```python
-def __init__(
-    self,
-    provider: str = "gemini",
-    api_key: str | None = None,
-    model: str | None = None,
-    **kwargs: Any,
-) -> None:
+from .errors import KineError, ProviderAPIError, ProviderNotFoundError, APIKeyNotFoundError, APIModelNotFoundError
+
+__all__ = [
+    # ...,
+    "APIKeyNotFoundError",
+    "APIModelNotFoundError",
+]
 ```
 
-3. Provide explicit provider constructors so users can write:
+#### 4.3 `Kine.generate_text` has no docstrings (LOW)
 
 ```python
-from kine import Kine
-from kine.providers import GeminiProvider
-
-ai = Kine(GeminiProvider(api_key="..."))
-response = await ai.generate_text("Hello")
+# src/kine/core.py:12-18
+async def generate_text(
+    self, prompt: str | TextGenerationRequest, **kwargs: Any
+) -> TextGenerationResponse:
 ```
+
+Users get no inline help in their IDE. A clear docstring describing the two calling conventions (string + kwargs vs. explicit `TextGenerationRequest`) would significantly improve DX.
+
+**Severity:** Low  
+**Fix:** Add docstrings:
+
+```python
+async def generate_text(
+    self, prompt: str | TextGenerationRequest, **kwargs: Any
+) -> TextGenerationResponse:
+    """Generate text using the configured provider.
+
+    Two calling conventions:
+        1. await kine.generate_text("Explain quantum computing")
+        2. await kine.generate_text(TextGenerationRequest(prompt="..."))
+
+    Args:
+        prompt: Plain string or pre-built TextGenerationRequest.
+        **kwargs: Overrides for temperature, max_tokens (only when prompt is a string).
+
+    Returns:
+        TextGenerationResponse with generated text and metadata.
+    """
+```
+
+### DX Verdict
+| # | Issue | Severity |
+|---|---|---|
+| 4.1 | `TextGenerationRequest`/`TextGenerationResponse` not exported | **High** |
+| 4.2 | `APIKeyNotFoundError`/`APIModelNotFoundError` not exported | Medium |
+| 4.3 | No docstrings on `Kine` methods | Low |
 
 ---
 
 ## 5. Project Structure and Package Management Verification
 
 ### Standard
-Use a modern `src/` layout, keep tests outside `src/`, keep core dependencies minimal, declare all runtime dependencies explicitly, and separate dev tools into `[tool.poetry.group.dev.dependencies]`.
+Use a modern `src/` layout with `tests/`, `docs/`, `examples/` in the root. Heavy dependencies must be optional (`extras`). Tool configurations for pytest, mypy, black, isort must be explicit.
 
 ### Findings
 
-#### 5.1 No `src/` layout
-The package `kine/` lives directly in the repository root. Modern Python packaging recommends `src/kine/` to prevent accidental imports from the working directory and to ensure the installed package is tested, not the source tree.
-
-```text
-kine/
-├── kine/          # <- should be src/kine/
-├── tests/
-└── pyproject.toml
-```
-
-#### 5.2 `pydantic` is used but not declared
-`kine/schemas/requests.py` and `responses.py` import `pydantic`, but `pydantic` is not listed in `[tool.poetry.dependencies]`. It is currently installed only as a transitive dependency of other packages.
-
-```python
-# kine/schemas/requests.py
-from pydantic import BaseModel
-```
+#### 5.1 `python-dotenv` is a mandatory core dependency (HIGH)
 
 ```toml
-# pyproject.toml — pydantic is missing here
-[tool.poetry.dependencies]
-python = "^3.10"
-openai = { version = "^1.0", optional = true }
-google-generativeai = { version = "^0.3.0", optional = true }
-huggingface-hub = { version = "^0.20.0", optional = true }
-requests = "^2.31.0"
-rich = "^13.7.0"
+# pyproject.toml:15
 python-dotenv = "^1.0.0"
 ```
 
-#### 5.3 Heavy dependencies are not optional
-`requests` and `rich` are listed as mandatory core dependencies. For an "ultralight" multi-provider library, these should be optional or removed.
+`python-dotenv` is listed as a mandatory runtime dependency. The core library (`Kine`) no longer calls `load_dotenv()` or imports `dotenv` anywhere. The only remaining usage is in `examples/test_gemini.py` and `tests/unit/test_providers/test_gemini.py` — both user/application code, not library code. This dependency adds unnecessary weight to every installation.
 
-#### 5.4 Broken `deepseek` extra
-The `deepseek` extra references `"deepseek"`, but the dependency itself is commented out and no such PyPI package exists.
-
-```toml
-# pyproject.toml
-dependencies:
-  # deepseek = { version = "^0.0.1", optional = true }
-
-[tool.poetry.extras]
-deepseek = ["deepseek"]
-all = ["openai", "huggingface-hub", "google-generativeai", "deepseek"]
-```
-
-Installing with `--extras "all"` currently works only because the line is commented out and Poetry ignores it; otherwise it would fail.
-
-#### 5.5 Dev dependencies are correctly grouped
-`pytest`, `mypy`, `black`, `isort`, `pre-commit`, and `git-changelog` are correctly placed under `[tool.poetry.group.dev.dependencies]`. This part complies with the standard.
-
-#### 5.6 No tool configuration
-There are no `[tool.black]`, `[tool.isort]`, `[tool.mypy]`, or `[tool.pytest.ini_options]` sections. As a result:
-- `pytest` collects `test_*.py` from the entire repo, including `examples/`.
-- `mypy` runs with defaults that reject implicit Optional.
-- `black` and `isort` use their own defaults, which currently report many issues.
-
-### Severity
-**High** — missing dependency declaration, broken extra, and non-standard layout are all packaging risks.
-
-### Recommended Fixes
-
-1. Migrate to `src/` layout and update `pyproject.toml`:
+**Severity:** High  
+**Fix:** Move `python-dotenv` to optional extras or development dependencies:
 
 ```toml
-packages = [{include = "kine", from = "src"}]
-```
-
-2. Declare `pydantic` explicitly and move heavy deps to optional extras:
-
-```toml
-[tool.poetry.dependencies]
-python = "^3.10"
-pydantic = "^2.5"
+# Remove from [tool.poetry.dependencies]
+# Option A: make it optional
 python-dotenv = { version = "^1.0.0", optional = true }
 
-openai = { version = "^1.0", optional = true }
-google-generativeai = { version = "^0.3.0", optional = true }
-huggingface-hub = { version = "^0.20.0", optional = true }
-httpx = { version = "^0.27", optional = true }
-
-[tool.poetry.extras]
-gemini = ["google-generativeai"]
-openai = ["openai", "httpx"]
-huggingface = ["huggingface-hub", "httpx"]
-all = ["google-generativeai", "openai", "huggingface-hub", "httpx", "python-dotenv"]
+# Option B: move to dev (if only used in examples/tests)
+# Remove entirely from [tool.poetry.dependencies]
+[tool.poetry.group.dev.dependencies]
+python-dotenv = "^1.0.0"
 ```
 
-3. Remove the `deepseek` extra until a real dependency exists.
-4. Add tool configurations:
+#### 5.2 `pyproject.toml` changelog sections in Spanish (MEDIUM)
 
 ```toml
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-
-[tool.mypy]
-python_version = "3.10"
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-
-[tool.black]
-line-length = 88
-target-version = ['py310']
-
-[tool.isort]
-profile = "black"
-line_length = 88
+[tool.git-changelog]
+sections = [
+    { name = "feat", title = "🚀 Nuevas Funcionalidades" },
+    { name = "fix", title = "🐛 Correcciones" },
+    { name = "perf", title = "⚡ Mejoras de Rendimiento" },
+    { name = "refactor", title = "♻️ Refactorizaciones" }
+]
 ```
+
+The section titles are in Spanish. For a library with an English README, docs, and error messages, the changelog configuration should also be in English.
+
+**Severity:** Medium  
+**Fix:**
+
+```toml
+[tool.git-changelog]
+sections = [
+    { name = "feat", title = "🚀 Features" },
+    { name = "fix", title = "🐛 Bug Fixes" },
+    { name = "perf", title = "⚡ Performance Improvements" },
+    { name = "refactor", title = "♻️ Refactoring" }
+]
+```
+
+#### 5.3 No CI workflow (HIGH)
+
+The repository has no `.github/workflows/` directory. For a PyPI-targeted library in 2026, a CI pipeline that runs `pytest`, `mypy`, `black`, and `isort` on every push and PR is a baseline expectation.
+
+**Severity:** High  
+**Fix:** Add a minimal GitHub Actions workflow:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install poetry
+      - run: poetry install --extras all
+      - run: poetry run mypy src
+      - run: poetry run black --check src tests
+      - run: poetry run isort --check-only src tests
+```
+
+#### 5.4 Tests are live integration scripts, not unit tests (MEDIUM)
+
+All files under `tests/` are either empty (`test_core.py`, `test_chatgpt.py`, `test_deepseek.py`) or execute real API calls (`test_gemini.py` calls Gemini with a fake key, which will fail at runtime). There are no mocked unit tests.
+
+**Severity:** Medium  
+**Fix:** Write proper unit tests with `AsyncMock`:
+
+```python
+# tests/unit/test_core.py
+import pytest
+from unittest.mock import AsyncMock
+from kine import Kine
+from kine.schemas.requests import TextGenerationRequest
+from kine.schemas.responses import TextGenerationResponse
+
+@pytest.mark.asyncio
+async def test_generate_text_delegates_to_provider():
+    provider = AsyncMock()
+    provider.generate_text.return_value = TextGenerationResponse(
+        text="hello", model="test"
+    )
+    kine = Kine(provider)
+    result = await kine.generate_text("Hi")
+    assert result.text == "hello"
+    provider.generate_text.assert_awaited_once()
+```
+
+#### 5.5 `examples/basic_usage.py` is empty (LOW)
+
+This file is supposed to be the first example a contributor reads, but it contains nothing.
+
+**Severity:** Low  
+**Fix:** Populate it with the same content as the Quickstart in `README.md`.
+
+#### 5.6 `.env.example` includes keys for unimplemented providers (LOW)
+
+`CHATGPT_API_KEY`, `DEEPSEEK_API_KEY`, and `HF_TOKEN` are listed but the corresponding providers are stubs. This misleads users.
+
+**Severity:** Low  
+**Fix:** Keep only `GEMINI_API_KEY` and add `OLLAMA_HOST` if needed:
+
+```bash
+GEMINI_API_KEY=your_key_here
+```
+
+### Packaging Verdict
+| # | Issue | Severity |
+|---|---|---|
+| 5.1 | `python-dotenv` mandatory, unused in core | **High** |
+| 5.2 | Changelog sections in Spanish | Medium |
+| 5.3 | No CI workflow | **High** |
+| 5.4 | Tests are live scripts, not unit tests | Medium |
+| 5.5 | `examples/basic_usage.py` empty | Low |
+| 5.6 | `.env.example` has keys for stubs | Low |
 
 ---
 
@@ -481,17 +500,36 @@ line_length = 88
 
 | Priority | Item | Category |
 |---|---|---|
-| Critical | Convert public API and adapters to `async` | Concurrency |
-| Critical | Define and use `IAProvider` protocol | Domain / Adapters |
-| High | Move provider loading and env-var resolution out of `core.py` | Domain |
-| High | Declare `pydantic` and make heavy deps optional | Packaging |
-| High | Migrate to `src/` layout | Packaging |
-| High | Translate SDK exceptions into domain exceptions | Adapters |
-| Medium | Export schemas and exceptions from `__init__.py` | DX |
-| Medium | Fix mypy type errors (`str = None`, `-> Type`) | DX |
-| Medium | Remove or implement empty stubs (`cache.py`, `logger.py`, `safety.py`, provider stubs) | Completeness |
-| Low | Add `[tool.*]` configurations for black, isort, mypy, pytest | Tooling |
+| **Critical** | Wrap `GeminiProvider.__init__` SDK calls in try/except to prevent leaking raw SDK exceptions | Adapters |
+| **High** | Shut down `ThreadPoolExecutor` in `GeminiProvider` | Adapters |
+| **High** | Close `httpx.AsyncClient` in `OllamaProvider` | Adapters |
+| **High** | Export `TextGenerationRequest`/`TextGenerationResponse` from `__init__.py` | DX |
+| **High** | Remove `python-dotenv` from mandatory deps (make optional or dev-only) | Packaging |
+| **High** | Add GitHub Actions CI workflow | Packaging |
+| **Medium** | Replace `asyncio.get_event_loop()` with `asyncio.to_thread()` | Concurrency |
+| **Medium** | Replace `NotImplementedError` with `ProviderAPIError` in Gemini embeddings | Adapters |
+| **Medium** | Export `APIKeyNotFoundError`/`APIModelNotFoundError` from `__init__.py` | DX |
+| **Medium** | Add async lifecycle (`aclose` / `__aexit__`) to both providers | Concurrency |
+| **Medium** | Write mocked unit tests for `Kine` and adapters | Testing |
+| **Medium** | Translate changelog sections to English | Packaging |
+| **Medium** | Switch `protocols.py` to relative imports | Domain |
+| **Medium** | Remove `**kwargs: Any` in favor of explicit parameters | Domain/DX |
+| **Low** | Add docstrings to `Kine` methods | DX |
+| **Low** | Populate `examples/basic_usage.py` | Documentation |
+| **Low** | Clean up `.env.example` | Packaging |
 
 ---
+
+## Summary
+
+```
+Pillar 1 — Domain:      2 Medium, 1 Low
+Pillar 2 — Adapters:    1 Critical, 2 High, 1 Medium, 1 Low
+Pillar 3 — Concurrency: 2 Medium
+Pillar 4 — DX:          1 High, 1 Medium, 1 Low
+Pillar 5 — Packaging:   2 High, 2 Medium, 2 Low
+```
+
+The architectural skeleton is sound. The `IAProvider` protocol and dependency injection in `Kine` are correct. The remaining work is completing the adapter lifecycle, cleaning up the dependency tree, building CI, and adding proper mocked tests.
 
 *End of audit report.*
