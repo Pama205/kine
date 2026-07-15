@@ -1,15 +1,15 @@
-# Registro de Cambios
+# Changelog
 
-## [Versión 0.1.0] - 2025-04-25
+## [0.1.0] - 2025-04-25
 
-### 🚀 Nuevas Funcionalidades
-- Soporte inicial para Google Gemini API
-- Sistema de proveedores modular (`gemini`, `openai`)
-- Clase base `AIFlow` con método `generate_text()`
+### Features
+- Initial support for Google Gemini API
+- Modular provider system (`gemini`, `openai`)
+- Base `Kine` class with `generate_text()` method
 
-### 🐛 Correcciones
-- Solucionado error de inicialización con API keys faltantes
-- Validación mejorada de parámetros en `TextGenerationRequest`
+### Bug Fixes
+- Fixed initialization error with missing API keys
+- Improved parameter validation in `TextGenerationRequest`
 
-### ⚠️ Cambios Importantes
-- **BREAKING**: Renombrado `GeminiClient` a `GeminiProvider`
+### BREAKING CHANGES
+- Renamed `GeminiClient` to `GeminiProvider`

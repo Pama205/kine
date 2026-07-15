@@ -43,6 +43,24 @@ kine/
 
 ## Quickstart
 
+### With Ollama (default, no API key required)
+
+```python
+import asyncio
+from kine import Kine
+from kine.providers.ollama import OllamaProvider
+
+async def main() -> None:
+    provider = OllamaProvider()
+    kine = Kine(provider)
+    response = await kine.generate_text("Explain quantum computing in one sentence")
+    print(response.text)
+
+asyncio.run(main())
+```
+
+### With Gemini
+
 ```python
 import asyncio
 from kine import Kine
@@ -50,17 +68,14 @@ from kine.providers.gemini import GeminiProvider
 
 async def main() -> None:
     provider = GeminiProvider(api_key="YOUR_API_KEY")
-    ai = Kine(provider)
-
-    response = await ai.generate_text(
-        "Explain quantum computing in one sentence"
-    )
+    kine = Kine(provider)
+    response = await kine.generate_text("Explain quantum computing in one sentence")
     print(response.text)
 
 asyncio.run(main())
 ```
 
-> **Note:** Only the **Gemini** provider is fully implemented. OpenAI, DeepSeek, and HuggingFace adapters are placeholder stubs.
+> **Note:** **Ollama** is the default provider for development and works locally with no API key. Gemini, OpenAI, DeepSeek, and HuggingFace adapters are also available.
 
 ## Development
 
